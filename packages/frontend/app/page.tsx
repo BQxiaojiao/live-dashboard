@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useConfig, useConfigLoader, ConfigContext } from "@/hooks/useConfig";
+import { useNightMode } from "@/hooks/useNightMode";
 import type { CurrentResponse, DashboardProfile, DeviceState } from "@/lib/api";
 import { fetchCurrent, fetchHealthData } from "@/lib/api";
 import Header from "@/components/Header";
@@ -40,6 +41,7 @@ export default function Home() {
 function HomeInner() {
   const config = useConfig();
   const { displayName } = config;
+  useNightMode();
   const dashboards = useMemo<DashboardOption[]>(() => {
     return [
       {
@@ -130,11 +132,6 @@ function HomeInner() {
     return map;
   }, [current?.devices]);
 
-  const allOffline = useMemo(() => {
-    if (!current?.devices || current.devices.length === 0) return false;
-    return current.devices.every((device) => device.is_online !== 1);
-  }, [current?.devices]);
-
   const devices = useMemo(() => {
     const list = current?.devices ?? [];
     return [...list].sort((left, right) => left.device_id.localeCompare(right.device_id));
@@ -197,13 +194,6 @@ function HomeInner() {
       return dashboardSnapshots[dashboard.id] ?? buildDashboardSnapshot(dashboard, null);
     });
   }, [dashboardSnapshots, dashboards]);
-
-  useEffect(() => {
-    document.body.classList.toggle("night-mode", allOffline);
-    return () => {
-      document.body.classList.remove("night-mode");
-    };
-  }, [allOffline]);
 
   // 只有本地一个面板时，Panels 切换器和总览大卡片的信息与下方状态气泡/
   // 设备列表完全重复，纯占竖向空间——整个区域不渲染
