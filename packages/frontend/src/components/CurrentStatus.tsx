@@ -77,7 +77,9 @@ export default function CurrentStatus({ device, displayName: displayNameProp }: 
           <div className="py-1">
             <p className="text-xl mb-1">(-.-)zzZ</p>
             <p className="text-sm text-[var(--color-text-muted)]">
-              {displayName} 不在电脑前喵~
+              {device?.platform === "android"
+                ? "没在看手机喵~"
+                : `${displayName} 不在电脑前喵~`}
             </p>
           </div>
         )}

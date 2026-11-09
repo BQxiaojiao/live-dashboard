@@ -2,9 +2,9 @@
 
 import { useEffect, useState } from "react";
 
-// 夜间主题时段：访客本地时间 18:00 起至次日 06:00（含 18:00，不含 06:00）
+// 夜间主题时段：访客本地时间 18:00 起至次日 05:00（含 18:00，不含 05:00）
 export const NIGHT_START_HOUR = 18;
-export const NIGHT_END_HOUR = 6;
+export const NIGHT_END_HOUR = 5;
 
 const CHECK_INTERVAL_MS = 30_000;
 

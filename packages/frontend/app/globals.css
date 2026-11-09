@@ -25,7 +25,7 @@ body {
   transition: background-color 1.2s ease, color 1.2s ease;
 }
 
-/* === Night mode (visitor local time 18:00–06:00) === */
+/* === Night mode (visitor local time 18:00–05:00) === */
 body.night-mode {
   --color-cream: #1a1a2e;
   --color-sakura-bg: #1e1e30;
