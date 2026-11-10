@@ -1,6 +1,7 @@
 import { resolve, normalize, relative, sep } from "node:path";
 import { realpathSync } from "node:fs";
 import { realpath as realpathAsync } from "node:fs/promises";
+import { brotliCompressSync, gzipSync, constants as zlibConstants } from "node:zlib";
 import { handleReport } from "./routes/report";
 import { handleCurrent } from "./routes/current";
 import { handleTimeline } from "./routes/timeline";
@@ -47,15 +48,132 @@ try {
   console.warn(`[server] Static dir not found: ${STATIC_ROOT} — static files won't be served`);
 }
 
-async function serveStaticFile(realFile: string): Promise<Response> {
-  if (realFile.endsWith(".html")) {
-    const html = await Bun.file(realFile).text();
-    return new Response(injectSiteConfig(html), {
-      headers: { "Content-Type": "text/html; charset=utf-8" },
-    });
+// === Static asset compression & caching ===
+// Next.js emits content-hashed filenames under /_next/static, so they never change
+// and can be cached by browsers/CDNs for a year. Everything else gets a short TTL.
+const IMMUTABLE_PREFIX = "/_next/static/";
+const COMPRESSIBLE_EXT = /\.(?:js|mjs|cjs|css|html|htm|json|map|svg|txt|xml|webmanifest)$/i;
+const COMPRESS_CACHE_LIMIT = 128;
+
+type Encoding = "br" | "gzip";
+
+interface CompressedEntry {
+  lastModified: number;
+  br?: Uint8Array;
+  gzip?: Uint8Array;
+}
+
+// Compression is CPU-bound and the container is limited to 0.5 CPU, so results are
+// memoized per file. Files are immutable, so entries stay valid until the next rebuild.
+const compressedCache = new Map<string, CompressedEntry>();
+
+function parseAcceptEncoding(header: string | null): Map<string, number> {
+  const accepted = new Map<string, number>();
+  if (!header) return accepted;
+  for (const raw of header.split(",")) {
+    const [rawName, ...rawParams] = raw.trim().split(";");
+    const name = rawName?.trim().toLowerCase();
+    if (!name) continue;
+    let quality = 1;
+    for (const param of rawParams) {
+      const [rawKey, rawValue] = param.trim().split("=");
+      if (rawKey?.trim().toLowerCase() === "q") {
+        const parsed = Number(rawValue);
+        if (!Number.isNaN(parsed)) quality = parsed;
+      }
+    }
+    accepted.set(name, quality);
+  }
+  return accepted;
+}
+
+function pickEncoding(header: string | null): Encoding | null {
+  const accepted = parseAcceptEncoding(header);
+  const wildcard = accepted.get("*");
+  const br = accepted.get("br") ?? wildcard;
+  const gzip = accepted.get("gzip") ?? accepted.get("x-gzip") ?? wildcard;
+  // "deflate" is ignored on purpose: brotli/gzip cover every browser we target.
+  if (br !== undefined && br > 0 && (gzip === undefined || br >= gzip)) return "br";
+  if (gzip !== undefined && gzip > 0) return "gzip";
+  return null;
+}
+
+function compressBody(data: Uint8Array, encoding: Encoding): Uint8Array {
+  return encoding === "br"
+    ? brotliCompressSync(data, {
+        params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 5 },
+      })
+    : gzipSync(data, { level: 6 });
+}
+
+function cacheControlFor(urlPath: string, isHtml: boolean): string {
+  // HTML is never immutable: it carries the runtime site config and doubles as the
+  // SPA fallback, so a missing /_next/static/* chunk must not be cached for a year.
+  if (isHtml) return "no-cache";
+  if (urlPath.startsWith(IMMUTABLE_PREFIX)) return "public, max-age=31536000, immutable";
+  return "public, max-age=3600";
+}
+
+async function serveStaticFile(
+  realFile: string,
+  urlPath: string,
+  acceptEncoding: string | null,
+): Promise<Response> {
+  const isHtml = realFile.endsWith(".html");
+  const cacheControl = cacheControlFor(urlPath, isHtml);
+  const encoding = pickEncoding(acceptEncoding);
+
+  // HTML is injected per request (site config), so it is never cached on disk here.
+  if (isHtml) {
+    const body = new TextEncoder().encode(injectSiteConfig(await Bun.file(realFile).text()));
+    const headers: Record<string, string> = {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": cacheControl,
+      Vary: "Accept-Encoding",
+    };
+    if (encoding) {
+      headers["Content-Encoding"] = encoding;
+      return new Response(compressBody(body, encoding), { headers });
+    }
+    return new Response(body, { headers });
   }
 
-  return new Response(Bun.file(realFile));
+  const file = Bun.file(realFile);
+  const headers: Record<string, string> = {
+    "Content-Type": file.type || "application/octet-stream",
+    "Cache-Control": cacheControl,
+  };
+
+  // Images/fonts/ico are already compressed — re-encoding them would waste CPU.
+  if (!COMPRESSIBLE_EXT.test(realFile) || !encoding) {
+    if (COMPRESSIBLE_EXT.test(realFile)) headers["Vary"] = "Accept-Encoding";
+    return new Response(file, { headers });
+  }
+
+  headers["Vary"] = "Accept-Encoding";
+
+  const lastModified = file.lastModified;
+  let entry = compressedCache.get(realFile);
+  if (!entry || entry.lastModified !== lastModified) {
+    entry = { lastModified };
+    compressedCache.set(realFile, entry);
+  }
+
+  let body = entry[encoding];
+  if (!body) {
+    body = compressBody(new Uint8Array(await file.arrayBuffer()), encoding);
+    entry[encoding] = body;
+  }
+
+  if (compressedCache.size > COMPRESS_CACHE_LIMIT) {
+    // Paths are content-hashed, so a rebuild produces new keys — dropping everything
+    // is cheaper and safer than tracking LRU order.
+    compressedCache.clear();
+    compressedCache.set(realFile, entry);
+  }
+
+  headers["Content-Encoding"] = encoding;
+  return new Response(body, { headers });
 }
 
 const server = Bun.serve({
@@ -63,6 +181,7 @@ const server = Bun.serve({
   async fetch(req) {
     const url = new URL(req.url);
     const { pathname } = url;
+    const acceptEncoding = req.headers.get("accept-encoding");
 
     // CORS headers for development
     const corsHeaders: Record<string, string> = {
@@ -136,12 +255,12 @@ const server = Bun.serve({
                 // Serve from the resolved real path
                 const file = Bun.file(realFile);
                 if (await file.exists()) {
-                  return serveStaticFile(realFile);
+                  return serveStaticFile(realFile, pathname, acceptEncoding);
                 }
                 // SPA fallback: file not found (or is a directory), serve index.html
                 const indexFile = Bun.file(`${REAL_STATIC_ROOT}/index.html`);
                 if (await indexFile.exists()) {
-                  return serveStaticFile(`${REAL_STATIC_ROOT}/index.html`);
+                  return serveStaticFile(`${REAL_STATIC_ROOT}/index.html`, pathname, acceptEncoding);
                 }
                 response = Response.json({ error: "Not found" }, { status: 404 });
               }
@@ -149,7 +268,7 @@ const server = Bun.serve({
               // realpath fails if file doesn't exist — try SPA fallback
               const indexFile = Bun.file(`${REAL_STATIC_ROOT}/index.html`);
               if (await indexFile.exists()) {
-                return serveStaticFile(`${REAL_STATIC_ROOT}/index.html`);
+                return serveStaticFile(`${REAL_STATIC_ROOT}/index.html`, pathname, acceptEncoding);
               }
               response = Response.json({ error: "Not found" }, { status: 404 });
             }
