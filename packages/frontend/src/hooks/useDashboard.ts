@@ -10,6 +10,7 @@ import {
 } from "@/lib/api";
 
 const POLL_INTERVAL = 10 * 1000; // 10 seconds
+const REQUEST_TIMEOUT = 8 * 1000;
 
 function todayStr(): string {
   const d = new Date();
@@ -40,26 +41,44 @@ export function useDashboard(dashboardId?: string) {
 
     const doFetch = async () => {
       const thisRequest = ++requestId;
+      const requestController = new AbortController();
+      const abortRequest = () => requestController.abort();
+      let timedOut = false;
+      const timeoutId = window.setTimeout(() => {
+        timedOut = true;
+        requestController.abort();
+      }, REQUEST_TIMEOUT);
+      controller.signal.addEventListener("abort", abortRequest, { once: true });
+
       try {
-        setError(null);
         if (firstLoad.current) setLoading(true);
         const [cur, tl] = await Promise.all([
-          fetchCurrent(controller.signal, requestOptions),
-          fetchTimeline(selectedDate, controller.signal, requestOptions),
+          fetchCurrent(requestController.signal, requestOptions),
+          fetchTimeline(selectedDate, requestController.signal, requestOptions),
         ]);
         if (!controller.signal.aborted && thisRequest === requestId) {
           setCurrent(cur);
           setTimeline(tl);
           setViewerCount(cur.viewer_count ?? 0);
-          firstLoad.current = false;
+          setError(null);
         }
       } catch (e) {
+        requestController.abort();
         if (!controller.signal.aborted && thisRequest === requestId) {
-          setError(e instanceof Error ? e.message : "Failed to fetch data");
+          setError(
+            timedOut
+              ? "请求超时，请检查服务器连接"
+              : e instanceof Error
+                ? e.message
+                : "Failed to fetch data",
+          );
         }
       } finally {
+        window.clearTimeout(timeoutId);
+        controller.signal.removeEventListener("abort", abortRequest);
         if (!controller.signal.aborted && thisRequest === requestId) {
           setLoading(false);
+          firstLoad.current = false;
         }
       }
     };

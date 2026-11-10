@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { useConfig } from "@/hooks/useConfig";
 
 function getGreeting(): { kaomoji: string; text: string } {
@@ -19,6 +20,7 @@ interface HeaderProps {
 export default function Header({ serverTime, viewerCount = 0, displayName: displayNameProp }: HeaderProps) {
   const { displayName: configDisplayName } = useConfig();
   const displayName = displayNameProp ?? configDisplayName;
+  const [greeting, setGreeting] = useState({ kaomoji: "(◕‿◕)", text: "你好呀~" });
   const timeStr = (() => {
     if (!serverTime) return "--:--";
     const d = new Date(serverTime);
@@ -26,7 +28,9 @@ export default function Header({ serverTime, viewerCount = 0, displayName: displ
     return d.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
   })();
 
-  const greeting = getGreeting();
+  useEffect(() => {
+    setGreeting(getGreeting());
+  }, []);
 
   return (
     <header className="pb-4 mb-6 separator-dashed">
